@@ -2,24 +2,36 @@
 
 A browser-based hearing and notice dashboard for AC-34 Matiala.
 
-## Workflow
+## Normal workflow
 
-1. Download the latest ECI `NOTICE_REPORT_PART_WISE` Excel export.
-2. Open the deployed dashboard.
-3. Upload the Excel file using **Upload latest Excel**.
-4. Select any hearing date.
-5. Review overview, officer-wise summary, PS-wise details, and the complete ECI status table.
+1. Keep the AC-34 master/schedule information loaded in the browser using the existing dashboard workbook once.
+2. Every time a fresh ECI `NCT OF Delhi_NOTICE_REPORT_PART_WISE` Excel is downloaded, click **Upload ECI Excel**.
+3. The app reads the ECI `sirNoticeGenerate` sheet (or compatible `ECI_INPUT` sheet), filters AC 34 / MATIALA, joins the live ECI figures to the PS master, and rebuilds the dashboard.
+4. Select any hearing date to see that day's scheduled workload.
 
-The workbook is processed locally in the browser. The source ECI data does not need to be stored in GitHub.
+The ECI source workbook is processed locally in the browser and is not stored in GitHub.
 
-## Expected workbook
+## Hearing schedule
 
-The preferred input workbook contains:
-- `ECI_INPUT` — current ECI report, with the standard AC-34 columns.
-- `PS_MASTER` — polling-station/officer/BLO/supervisor master information.
-- `HEARING_DATA` — hearing dates and scheduled PS records.
+The application also accepts the separate **Part Wise Hearing Summary** workbook containing:
+- `Part No.`
+- `Hearing Date`
+- `Total Hearings`
 
-The current sample workbook has 430 polling stations and 19 hearing dates. The app filters the ECI report to AC Number 34 / MATIALA and uses the master/schedule sheets when present.
+Use **Update from Part Wise Hearing Summary** when the hearing schedule changes. After the schedule is loaded, the routine update remains the ECI upload only.
+
+## Dashboard views
+
+- Overview with workload and delivery charts
+- Officer-wise summary
+- PS-wise detail including officer, BLO, supervisor, locality, polling area, anomaly/mapping and voter fields
+- Raw ECI status/audit table
+- Hearing-date selector and latest-date shortcut
+- Search across PS/officer/centre/BLO/supervisor/locality/polling area
+
+## Data model
+
+The supplied AC-34 workbook provides the 430-row PS master and existing hearing schedule. The separate Part Wise Hearing Summary can update the schedule. The ECI report supplies the live notice and hearing status fields.
 
 ## Local development
 
@@ -32,4 +44,4 @@ Then open `http://localhost:3000`.
 
 ## Deploy on Vercel
 
-Import this GitHub repository (`anacambridge-max/hearing_dashboard`) into Vercel as a Next.js project. The default build command is `next build` and the output is ready for Vercel hosting.
+Import this GitHub repository (`anacambridge-max/hearing_dashboard`) into Vercel as a Next.js project. The default build command is `next build`.
