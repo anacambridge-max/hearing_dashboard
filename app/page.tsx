@@ -1,135 +1,66 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import * as XLSX from 'xlsx'
-import { Upload, RefreshCcw, Search, FileSpreadsheet, AlertTriangle } from 'lucide-react'
+import { Upload, RefreshCcw, Search, FileSpreadsheet, AlertTriangle, Settings2 } from 'lucide-react'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 
 type Row = Record<string, any>
-type Model = { eci: Row[]; ps: Row[]; schedule: Row[]; dates: string[]; source: string; uploadedAt: string }
+type Master = { ps: Row[]; schedule: Row[] }
+const fmt=(v:any)=>new Intl.NumberFormat('en-IN').format(Number(v||0))
+const safe=(v:any)=>v==null?'':String(v)
+const n=(v:any)=>Number(v||0)
+const key=(v:any)=>{if(v instanceof Date&&!isNaN(v.getTime()))return v.toISOString().slice(0,10);const d=new Date(safe(v));return isNaN(d.getTime())?'':d.toISOString().slice(0,10)}
+const label=(d:string)=>d?new Intl.DateTimeFormat('en-IN',{day:'2-digit',month:'short',year:'numeric'}).format(new Date(d+'T00:00:00')):'—'
+const read=(wb:XLSX.WorkBook,name:string)=>wb.Sheets[name]?XLSX.utils.sheet_to_json<Row>(wb.Sheets[name],{defval:null,raw:true}):[]
 
-const fmt = (v: any) => new Intl.NumberFormat('en-IN').format(Number(v || 0))
-const safe = (v: any) => v == null ? '' : String(v)
-const num = (v: any) => Number(v || 0)
-const dateKey = (v: any) => {
-  if (v instanceof Date && !isNaN(v.getTime())) return v.toISOString().slice(0, 10)
-  const d = new Date(safe(v))
-  return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10)
-}
-const dateLabel = (v: string) => v ? new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }).format(new Date(v + 'T00:00:00')) : '—'
-
-function sheet(wb: XLSX.WorkBook, name: string): Row[] {
-  const ws = wb.Sheets[name]
-  return ws ? XLSX.utils.sheet_to_json<Row>(ws, { defval: null, raw: true }) : []
-}
-
-function buildModel(wb: XLSX.WorkBook, source: string): Model {
-  const eci = sheet(wb, 'ECI_INPUT').filter(r => num(r['AC Number']) === 34 || safe(r['Asmbly Name']).toUpperCase() === 'MATIALA')
-  const ps = sheet(wb, 'PS_MASTER')
-  const schedule = sheet(wb, 'HEARING_DATA').filter(r => num(r['PS No.']) > 0).map(r => ({ ...r, dateKey: dateKey(r.Date) }))
-  const dates = [...new Set(schedule.map(r => r.dateKey).filter(Boolean))].sort()
-  return { eci, ps, schedule, dates, source, uploadedAt: new Date().toLocaleString('en-IN') }
+function extractEci(wb:XLSX.WorkBook){
+  const names=wb.SheetNames
+  let rows=read(wb,'sirNoticeGenerate')
+  if(!rows.length) rows=read(wb,'ECI_INPUT')
+  if(!rows.length){ for(const s of names){const r=read(wb,s);if(r[0]&&('Part No' in r[0]||'POLLING STATION' in r[0])){rows=r;break}} }
+  return rows.filter(r=>n(r['AC Number'])===34||safe(r['Asmbly Name']).toUpperCase()==='MATIALA')
 }
 
-export default function Home() {
-  const [model, setModel] = useState<Model | null>(null)
-  const [selectedDate, setSelectedDate] = useState('')
-  const [query, setQuery] = useState('')
-  const [tab, setTab] = useState<'overview' | 'officers' | 'ps' | 'eci'>('overview')
-  const [error, setError] = useState('')
+function extractMaster(wb:XLSX.WorkBook):Master{
+  const ps=read(wb,'PS_MASTER')
+  const h=read(wb,'HEARING_DATA')
+  return {ps, schedule:h.filter(r=>n(r['PS No.'])>0).map(r=>({dateKey:key(r.Date),ps:n(r['PS No.']),scheduled:n(r['Scheduled Notices for Hearing'])}))}
+}
 
-  const load = async (file: File) => {
-    try {
-      setError('')
-      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true })
-      for (const required of ['ECI_INPUT', 'PS_MASTER', 'HEARING_DATA']) {
-        if (!wb.Sheets[required]) throw new Error(`${required} sheet not found. Upload the same workbook structure used for the ECI paste/update workflow.`)
-      }
-      const m = buildModel(wb, file.name)
-      if (!m.eci.length) throw new Error('No AC-34 / MATIALA rows were found in ECI_INPUT.')
-      setModel(m)
-      setSelectedDate(m.dates[m.dates.length - 1] || '')
-      setTab('overview')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to read workbook.')
-    }
-  }
-
-  const active = useMemo(() => model?.schedule.filter(r => r.dateKey === selectedDate) || [], [model, selectedDate])
-  const psMap = useMemo(() => new Map((model?.ps || []).map(p => [num(p['PS No.']), p])), [model])
-  const enriched = useMemo(() => active.map(r => ({ ...r, ...(psMap.get(num(r['PS No.'])) || {}) })), [active, psMap])
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return enriched.filter(r => !q || [r.Officer, r['Hearing Centre'], r.BLO, r.Supervisor, r['PS No.'], r['Old PS No.'], r.Locality, r['Polling Area']].some(v => safe(v).toLowerCase().includes(q)))
-  }, [enriched, query])
-
-  const total = useMemo(() => enriched.reduce((a, r) => ({
-    ps: a.ps + 1,
-    scheduled: a.scheduled + num(r['Scheduled Notices for Hearing']),
-    generated: a.generated + num(r['Notice Generated']),
-    delivered: a.delivered + num(r['Notice Delivered']),
-    pending: a.pending + num(r['Notice Pending Delivery']),
-    held: a.held + num(r['Hearings Held'])
-  }), { ps: 0, scheduled: 0, generated: 0, delivered: 0, pending: 0, held: 0 }), [enriched])
-
-  const global = useMemo(() => (model?.eci || []).reduce((a, r) => ({
-    generated: a.generated + num(r['Notice Generated']),
-    delivered: a.delivered + num(r['Notice Delivered']),
-    pending: a.pending + num(r['Notice Pending Delivery']),
-    held: a.held + num(r['Hearings Held']),
-    lapsed: a.lapsed + num(r['Hearing Date Lapsed']) + num(r['Reschedule Date Lapsed']),
-    verified: a.verified + num(r['DEO-Status Verified']),
-    notVerified: a.notVerified + num(r['DEO-Status Not Verified'])
-  }), { generated: 0, delivered: 0, pending: 0, held: 0, lapsed: 0, verified: 0, notVerified: 0 }), [model])
-
-  const officers = useMemo(() => {
-    const map = new Map<string, Row>()
-    for (const r of enriched) {
-      const key = `${safe(r.Officer)}|||${safe(r['Hearing Centre'])}`
-      const x = map.get(key) || { Officer: r.Officer, Mobile: r['Officer Mobile'], Centre: r['Hearing Centre'], PS: 0, Scheduled: 0, Generated: 0, Delivered: 0, Pending: 0, Held: 0 }
-      x.PS++
-      x.Scheduled += num(r['Scheduled Notices for Hearing'])
-      x.Generated += num(r['Notice Generated'])
-      x.Delivered += num(r['Notice Delivered'])
-      x.Pending += num(r['Notice Pending Delivery'])
-      x.Held += num(r['Hearings Held'])
-      map.set(key, x)
-    }
-    return [...map.values()]
-  }, [enriched])
-
-  const pct = total.scheduled ? Math.round(total.delivered / total.scheduled * 100) : 0
-
-  return <div className="app-shell">
-    <header className="topbar"><div className="brand"><div><div className="title">AC-34 MATIALA — SIR 2026 HEARING & NOTICE DASHBOARD</div><div className="subtitle">Upload the latest ECI workbook and refresh the complete hearing position.</div></div>{model && <div className="updated">Loaded: {model.uploadedAt}<br />File: {model.source}</div>}</div></header>
-    <main className="page">
-      <div className="toolbar">
-        <div className="field"><label>ECI Input Workbook</label><label className="upload"><Upload size={16} /> Upload latest Excel<input type="file" accept=".xlsx,.xls" onChange={e => e.target.files?.[0] && load(e.target.files[0])} /></label></div>
-        <div className="field"><label>Hearing Date</label><select disabled={!model} value={selectedDate} onChange={e => setSelectedDate(e.target.value)}><option value="">Select hearing date</option>{model?.dates.map(d => <option key={d} value={d}>{dateLabel(d)}</option>)}</select></div>
-        <div className="field"><label>Search</label><div style={{ position: 'relative' }}><Search size={16} style={{ position: 'absolute', left: 11, top: 12, color: '#829ab1' }} /><input className="upload" style={{ paddingLeft: 34, width: '100%' }} value={query} onChange={e => setQuery(e.target.value)} placeholder="PS / officer / centre / BLO..." /></div></div>
-        <button className="tab" onClick={() => model && setSelectedDate(model.dates[model.dates.length - 1] || '')}><RefreshCcw size={14} /> Latest date</button>
-        <div className="status">{model ? `${fmt(model.eci.length)} ECI rows • ${fmt(model.ps.length)} PS master rows • ${model.dates.length} hearing dates` : 'Upload the ECI workbook to begin'}</div>
-      </div>
-      {error && <div className="error"><AlertTriangle size={15} style={{ verticalAlign: '-3px', marginRight: 6 }} />{error}</div>}
-
-      {!model ? <div className="panel" style={{ marginTop: 16 }}><div className="empty"><FileSpreadsheet size={42} style={{ marginBottom: 10 }} /><h2 style={{ margin: '4px 0 8px' }}>Upload your latest ECI report</h2><p style={{ margin: 0 }}>Upload the complete workbook used in your current hearing workflow. The dashboard will recalculate the selected-date, officer-wise, PS-wise and ECI status views in the browser.</p></div></div> : <>
-        <div className="section-title">Selected Hearing Date — {dateLabel(selectedDate)}</div>
-        <div className="cards">
-          {[["Polling Stations", total.ps, 'scheduled for this date'], ["Scheduled Notices", total.scheduled, 'hearing workload'], ["Notice Generated", total.generated, 'selected schedule'], ["Delivered", total.delivered, `${pct}% of scheduled`], ["Pending Delivery", total.pending, 'remaining notices'], ["Hearings Held", total.held, 'recorded by ECI']].map(([k, v, d]) => <div className="card" key={String(k)}><div className="kicker">{k}</div><div className="metric">{fmt(v)}</div><div className="delta">{d}</div></div>)}
-        </div>
-        {total.ps === 0 && <div className="error">No hearing is scheduled for the selected date.</div>}
-        <div className="tabs">{(['overview', 'officers', 'ps', 'eci'] as const).map(t => <button key={t} className={`tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>{t === 'ps' ? 'PS-wise Detail' : t === 'eci' ? 'ECI Status' : t === 'officers' ? 'Officer-wise' : 'Overview'}</button>)}</div>
-
-        {tab === 'overview' && <>
-          <div className="grid2"><div className="panel"><h3>Selected-date workload</h3><div className="details">{officers.map(o => <div className="detail" key={`${o.Officer}-${o.Centre}`}><b>{safe(o.Officer) || 'Officer not mapped'}</b>{safe(o.Centre)}<br />PS: {fmt(o.PS)} • Scheduled: {fmt(o.Scheduled)}<br />Delivered: {fmt(o.Delivered)} • Pending: {fmt(o.Pending)}</div>)}</div>{!officers.length && <div className="empty">No officer records for this date.</div>}</div>
-          <div className="panel"><h3>Operational snapshot from latest ECI data</h3><div className="details"><div className="detail"><b>Total generated</b>{fmt(global?.generated)}</div><div className="detail"><b>Total delivered</b>{fmt(global?.delivered)}</div><div className="detail"><b>Total pending</b>{fmt(global?.pending)}</div><div className="detail"><b>Hearing + reschedule lapses</b>{fmt(global?.lapsed)}</div><div className="detail"><b>DEO verified</b>{fmt(global?.verified)}</div><div className="detail"><b>DEO not verified</b>{fmt(global?.notVerified)}</div></div></div></div>
-        </>}
-
-        {tab === 'officers' && <div className="panel"><h3>Officer-wise Hearing Summary</h3><div className="table-wrap"><table className="table"><thead><tr><th>Officer</th><th>Mobile</th><th>Hearing Centre</th><th>PS</th><th>Scheduled</th><th>Generated</th><th>Delivered</th><th>Pending</th><th>Held</th><th>Delivery %</th></tr></thead><tbody>{officers.map((o, i) => <tr key={i}><td><b>{safe(o.Officer)}</b></td><td>{safe(o.Mobile)}</td><td>{safe(o.Centre)}</td><td>{fmt(o.PS)}</td><td className="right">{fmt(o.Scheduled)}</td><td className="right">{fmt(o.Generated)}</td><td className="right">{fmt(o.Delivered)}</td><td className="right">{fmt(o.Pending)}</td><td className="right">{fmt(o.Held)}</td><td>{o.Scheduled ? `${Math.round(o.Delivered / o.Scheduled * 100)}%` : '—'}</td></tr>)}<tr><td><b>TOTAL</b></td><td colSpan={2}></td><td>{fmt(total.ps)}</td><td className="right"><b>{fmt(total.scheduled)}</b></td><td className="right"><b>{fmt(total.generated)}</b></td><td className="right"><b>{fmt(total.delivered)}</b></td><td className="right"><b>{fmt(total.pending)}</b></td><td className="right"><b>{fmt(total.held)}</b></td><td><b>{pct}%</b></td></tr></tbody></table></div></div>}
-
-        {tab === 'ps' && <div className="panel"><h3>PS-wise Detail — {dateLabel(selectedDate)}</h3><div className="table-wrap"><table className="table"><thead><tr><th>PS</th><th>Old PS</th><th>Officer</th><th>Hearing Centre</th><th>PS Address</th><th>BLO</th><th>Supervisor</th><th>Locality</th><th>Polling Area</th><th>Scheduled</th><th>Generated</th><th>Delivered</th><th>Pending</th><th>Held</th></tr></thead><tbody>{filtered.map((r, i) => <tr key={i}><td><b>{safe(r['PS No.'])}</b></td><td>{safe(r['Old PS No.'])}</td><td>{safe(r.Officer)}</td><td>{safe(r['Hearing Centre'])}</td><td>{safe(r['PS Address'])}</td><td>{safe(r.BLO)}</td><td>{safe(r.Supervisor)}</td><td>{safe(r.Locality)}</td><td>{safe(r['Polling Area'])}</td><td className="right">{fmt(r['Scheduled Notices for Hearing'])}</td><td className="right">{fmt(r['Notice Generated'])}</td><td className="right">{fmt(r['Notice Delivered'])}</td><td className="right">{fmt(r['Notice Pending Delivery'])}</td><td className="right">{fmt(r['Hearings Held'])}</td></tr>)}</tbody></table></div><div className="footer-note">Showing {fmt(filtered.length)} of {fmt(enriched.length)} PS records.</div></div>}
-
-        {tab === 'eci' && <div className="panel"><h3>Complete ECI Status — AC-34 Matiala</h3><div className="table-wrap"><table className="table"><thead><tr>{['POLLING STATION','Notice Generated','Pending for Notice Generation','Notice Delivered','Notice Pending Delivery','Hearings Held','Hearing Date Lapsed','Reschedule Date Lapsed','DEO-Status Total Pending','DEO-Status Pending GT 5 Days','DEO-Status Verified','DEO-Status Not Verified','ERO/AERO Status Found Ineligible For Final w.r.t. Notice Generated','ERO/AERO Status Parked For Final Publication','ERO/AERO Parked For Final Publication w.r.t. Others'].map(h => <th key={h}>{h}</th>)}</tr></thead><tbody>{model.eci.map((r, i) => <tr key={i}>{['POLLING STATION','Notice Generated','Pending for Notice Generation','Notice Delivered','Notice Pending Delivery','Hearings Held','Hearing Date Lapsed','Reschedule Date Lapsed','DEO-Status Total Pending','DEO-Status Pending GT 5 Days','DEO-Status Verified','DEO-Status Not Verified','ERO/AERO Status Found Ineligible For Final w.r.t. Notice Generated','ERO/AERO Status Parked For Final Publication','ERO/AERO Parked For Final Publication w.r.t. Others'].map(h => <td key={h}>{safe(r[h])}</td>)}</tr>)}</tbody></table></div></div>}
-      </>}
-    </main>
-  </div>
+export default function Home(){
+ const [eci,setEci]=useState<Row[]>([]),[master,setMaster]=useState<Master|null>(null),[date,setDate]=useState(''),[q,setQ]=useState(''),[tab,setTab]=useState<'overview'|'officers'|'ps'|'eci'>('overview'),[error,setError]=useState(''),[source,setSource]=useState(''),[ready,setReady]=useState(false)
+ useEffect(()=>{try{const raw=localStorage.getItem('ac34_master');if(raw)setMaster(JSON.parse(raw))}catch{}setReady(true)},[])
+ const saveMaster=(m:Master)=>{setMaster(m);localStorage.setItem('ac34_master',JSON.stringify(m));setDate(m.schedule.map(x=>x.dateKey).filter(Boolean).sort().at(-1)||'')}
+ const uploadDashboard=async(f:File)=>{try{setError('');const wb=XLSX.read(await f.arrayBuffer(),{type:'array',cellDates:true});const m=extractMaster(wb);if(!m.ps.length||!m.schedule.length)throw new Error('Dashboard workbook must contain PS_MASTER and HEARING_DATA sheets.');saveMaster(m);setSource(f.name+' (one-time master setup)')}catch(e){setError(e instanceof Error?e.message:'Unable to read dashboard workbook.')}}
+ const uploadEci=async(f:File)=>{try{setError('');const wb=XLSX.read(await f.arrayBuffer(),{type:'array',cellDates:true});const rows=extractEci(wb);if(!rows.length)throw new Error('No AC-34 / MATIALA rows found. This does not look like the ECI NOTICE_REPORT_PART_WISE file.');setEci(rows);setSource(f.name);if(master)setDate(master.schedule.map(x=>x.dateKey).filter(Boolean).sort().at(-1)||'')}catch(e){setError(e instanceof Error?e.message:'Unable to read ECI file.')}}
+ const dates=useMemo(()=>[...new Set((master?.schedule||[]).map(x=>x.dateKey).filter(Boolean))].sort(),[master])
+ const eciMap=useMemo(()=>new Map(eci.map(r=>[n(r['Part No']??r['POLLING STATION']),r])),[eci])
+ const psMap=useMemo(()=>new Map((master?.ps||[]).map(r=>[n(r['PS No.']),r])),[master])
+ const active=useMemo(()=> (master?.schedule||[]).filter(r=>r.dateKey===date).map(s=>{const p=psMap.get(s.ps)||{};const e=eciMap.get(s.ps)||{};return {...p,...e,'PS No.':s.ps,'Scheduled Notices for Hearing':s.scheduled,'Notice Pending Delivery':s.scheduled-n(e['Notice Delivered']),'Date':s.dateKey}}),[master,date,eciMap,psMap])
+ const filtered=useMemo(()=>{const x=q.trim().toLowerCase();return active.filter(r=>!x||[r['PS No.'],r['Old PS No.'],r.Officer,r['Hearing Centre'],r.BLO,r.Supervisor,r.Locality,r['Polling Area']].some(v=>safe(v).toLowerCase().includes(x)))},[active,q])
+ const total=useMemo(()=>active.reduce((a,r)=>({ps:a.ps+1,scheduled:a.scheduled+n(r['Scheduled Notices for Hearing']),generated:a.generated+n(r['Notice Generated']),delivered:a.delivered+n(r['Notice Delivered']),pending:a.pending+n(r['Notice Pending Delivery']),held:a.held+n(r['Hearings Held'])}),{ps:0,scheduled:0,generated:0,delivered:0,pending:0,held:0}),[active])
+ const officers=useMemo(()=>{const m=new Map<string,Row>();active.forEach(r=>{const k=`${safe(r.Officer)}|${safe(r['Hearing Centre'])}`,x=m.get(k)||{Officer:r.Officer,Mobile:r['Officer Mobile'],Centre:r['Hearing Centre'],PS:0,Scheduled:0,Generated:0,Delivered:0,Pending:0,Held:0};x.PS++;x.Scheduled+=n(r['Scheduled Notices for Hearing']);x.Generated+=n(r['Notice Generated']);x.Delivered+=n(r['Notice Delivered']);x.Pending+=n(r['Notice Pending Delivery']);x.Held+=n(r['Hearings Held']);m.set(k,x)});return [...m.values()]},[active])
+ const global=useMemo(()=>eci.reduce((a,r)=>({generated:a.generated+n(r['Notice Generated']),delivered:a.delivered+n(r['Notice Delivered']),pending:a.pending+n(r['Notice Pending Delivery']),held:a.held+n(r['Hearings Held']),lapsed:a.lapsed+n(r['Hearing Date Lapsed'])+n(r['Reschedule Date Lapsed']),verified:a.verified+n(r['DEO-Status Verified']),notVerified:a.notVerified+n(r['DEO-Status Not Verified'])}),{generated:0,delivered:0,pending:0,held:0,lapsed:0,verified:0,notVerified:0}),[eci])
+ const chart=officers.map(o=>({name:safe(o.Officer).replace(/^SH\. |^SMT\. /,''),Scheduled:o.Scheduled,Delivered:o.Delivered,Pending:o.Pending}))
+ if(!ready)return null
+ return <div className="app-shell"><header className="topbar"><div className="brand"><div><div className="title">AC-34 MATIALA — SIR 2026 HEARING & NOTICE DASHBOARD</div><div className="subtitle">Upload the latest ECI NOTICE_REPORT_PART_WISE file to refresh the live position.</div></div><div className="updated">{source&&<>Source: {source}<br/></>}{eci.length?`${fmt(eci.length)} ECI rows loaded`:master?`${fmt(master.ps.length)} PS master records saved`:''}</div></div></header><main className="page">
+ <div className="toolbar">
+  <div className="field"><label>Latest ECI Report — this is the file you normally upload</label><label className="upload"><Upload size={16}/> Upload ECI Excel<input type="file" accept=".xlsx,.xls" onChange={e=>e.target.files?.[0]&&uploadEci(e.target.files[0])}/></label></div>
+  <div className="field"><label>Hearing Date</label><select disabled={!master} value={date} onChange={e=>setDate(e.target.value)}><option value="">Select hearing date</option>{dates.map(d=><option key={d} value={d}>{label(d)}</option>)}</select></div>
+  <div className="field"><label>Search</label><div style={{position:'relative'}}><Search size={16} style={{position:'absolute',left:11,top:12,color:'#829ab1'}}/><input className="upload" style={{paddingLeft:34,width:'100%'}} value={q} onChange={e=>setQ(e.target.value)} placeholder="PS / officer / centre / BLO..."/></div></div>
+  <button className="tab" onClick={()=>setDate(dates.at(-1)||'')}><RefreshCcw size={14}/> Latest date</button>
+ </div>
+ {!master&&<div className="panel setup"><Settings2 size={28}/><h2>One-time setup</h2><p>Upload your existing <b>AC34_Matiala_Hearing_Dashboard</b> workbook once. This saves the PS master and hearing schedule in this browser. After that, your normal workflow is only: <b>upload the ECI sheet</b>.</p><label className="upload"><Upload size={16}/> Upload dashboard workbook<input type="file" accept=".xlsx,.xls" onChange={e=>e.target.files?.[0]&&uploadDashboard(e.target.files[0])}/></label></div>}
+ {error&&<div className="error"><AlertTriangle size={15}/> {error}</div>}
+ {master&&eci.length>0&&<>
+ <div className="section-title">Selected Hearing Date — {label(date)}</div><div className="cards"><div className="card"><div className="kicker">Polling Stations</div><div className="metric">{fmt(total.ps)}</div><div className="delta">scheduled</div></div><div className="card"><div className="kicker">Scheduled Notices</div><div className="metric">{fmt(total.scheduled)}</div><div className="delta">hearing workload</div></div><div className="card"><div className="kicker">Notice Generated</div><div className="metric">{fmt(total.generated)}</div></div><div className="card"><div className="kicker">Delivered</div><div className="metric">{fmt(total.delivered)}</div><div className="delta">{total.scheduled?Math.round(total.delivered/total.scheduled*100):0}% of scheduled</div></div><div className="card"><div className="kicker">Pending Delivery</div><div className="metric">{fmt(total.pending)}</div></div><div className="card"><div className="kicker">Hearings Held</div><div className="metric">{fmt(total.held)}</div></div></div>
+ <div className="tabs"><button className={`tab ${tab==='overview'?'active':''}`} onClick={()=>setTab('overview')}>Overview</button><button className={`tab ${tab==='officers'?'active':''}`} onClick={()=>setTab('officers')}>Officer-wise</button><button className={`tab ${tab==='ps'?'active':''}`} onClick={()=>setTab('ps')}>PS-wise Detail</button><button className={`tab ${tab==='eci'?'active':''}`} onClick={()=>setTab('eci')}>ECI Status</button></div>
+ {tab==='overview'&&<><div className="grid2"><div className="panel"><h3>Officer workload</h3><div className="chart"><ResponsiveContainer width="100%" height="100%"><BarChart data={chart} margin={{top:8,right:15,left:-20,bottom:30}}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="name" angle={-25} textAnchor="end" interval={0} height={60} fontSize={10}/><YAxis fontSize={10}/><Tooltip/><Bar dataKey="Scheduled"/><Bar dataKey="Delivered"/><Bar dataKey="Pending"/></BarChart></ResponsiveContainer></div></div><div className="panel"><h3>Notice delivery status</h3><div className="chart"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={[{name:'Delivered',value:total.delivered},{name:'Pending',value:total.pending}]} innerRadius={62} outerRadius={92} dataKey="value" label>{[0,1].map(i=><Cell key={i}/>)}</Pie><Tooltip/></PieChart></ResponsiveContainer></div></div></div><div className="panel" style={{marginTop:14}}><h3>Latest ECI operational snapshot</h3><div className="details"><div className="detail"><b>Notice generated</b>{fmt(global.generated)}</div><div className="detail"><b>Notice delivered</b>{fmt(global.delivered)}</div><div className="detail"><b>Pending delivery</b>{fmt(global.pending)}</div><div className="detail"><b>Hearing + reschedule lapses</b>{fmt(global.lapsed)}</div><div className="detail"><b>DEO verified</b>{fmt(global.verified)}</div><div className="detail"><b>DEO not verified</b>{fmt(global.notVerified)}</div></div></div></>}
+ {tab==='officers'&&<div className="panel"><h3>Officer-wise Hearing Summary</h3><div className="table-wrap"><table className="table"><thead><tr><th>Officer</th><th>Mobile</th><th>Hearing Centre</th><th>PS</th><th>Scheduled</th><th>Generated</th><th>Delivered</th><th>Pending</th><th>Held</th><th>Delivery %</th></tr></thead><tbody>{officers.map((o,i)=><tr key={i}><td><b>{safe(o.Officer)}</b></td><td>{safe(o.Mobile)}</td><td>{safe(o.Centre)}</td><td>{o.PS}</td><td className="right">{fmt(o.Scheduled)}</td><td className="right">{fmt(o.Generated)}</td><td className="right">{fmt(o.Delivered)}</td><td className="right">{fmt(o.Pending)}</td><td className="right">{fmt(o.Held)}</td><td>{o.Scheduled?Math.round(o.Delivered/o.Scheduled*100)+'%':'—'}</td></tr>)}</tbody></table></div></div>}
+ {tab==='ps'&&<div className="panel"><h3>PS-wise Detail — {fmt(filtered.length)} records</h3><div className="table-wrap"><table className="table"><thead><tr><th>PS</th><th>Old PS</th><th>Officer</th><th>Hearing Centre</th><th>BLO</th><th>Supervisor</th><th>Scheduled</th><th>Generated</th><th>Delivered</th><th>Pending</th><th>Held</th><th>Locality</th><th>Polling Area</th><th>Anomaly</th><th>Mapping</th><th>Grand Total</th><th>Voters</th></tr></thead><tbody>{filtered.map((r,i)=><tr key={i}><td><b>{safe(r['PS No.'])}</b></td><td>{safe(r['Old PS No.'])}</td><td>{safe(r.Officer)}</td><td>{safe(r['Hearing Centre'])}</td><td>{safe(r.BLO)}</td><td>{safe(r.Supervisor)}</td><td>{fmt(r['Scheduled Notices for Hearing'])}</td><td>{fmt(r['Notice Generated'])}</td><td>{fmt(r['Notice Delivered'])}</td><td>{fmt(r['Notice Pending Delivery'])}</td><td>{fmt(r['Hearings Held'])}</td><td>{safe(r.Locality)}</td><td>{safe(r['Polling Area'])}</td><td>{fmt(r['Total Anomaly/Discrepancy'])}</td><td>{fmt(r['Total No Mapping'])}</td><td>{fmt(r['Grand Total'])}</td><td>{fmt(r['Total Voters'])}</td></tr>)}</tbody></table></div></div>}
+ {tab==='eci'&&<div className="panel"><h3>Raw ECI Status — {fmt(eci.length)} AC-34 rows</h3><div className="table-wrap"><table className="table"><thead><tr><th>Part No</th><th>Notice Generated</th><th>Pending Generation</th><th>Delivered</th><th>Pending Delivery</th><th>Hearings Held</th><th>Hearing Lapsed</th><th>Reschedule Lapsed</th><th>DEO Pending</th><th>DEO &gt;5 Days</th><th>Verified</th><th>Not Verified</th></tr></thead><tbody>{eci.map((r,i)=><tr key={i}><td><b>{safe(r['Part No']??r['POLLING STATION'])}</b></td><td>{fmt(r['Notice Generated'])}</td><td>{fmt(r['Pending for Notice Generation'])}</td><td>{fmt(r['Notice Delivered'])}</td><td>{fmt(r['Notice Pending Delivery'])}</td><td>{fmt(r['Hearings Held'])}</td><td>{fmt(r['Hearing Date Lapsed'])}</td><td>{fmt(r['Reschedule Date Lapsed'])}</td><td>{fmt(r['DEO-Status Total Pending'])}</td><td>{fmt(r['DEO-Status Pending GT 5 Days'])}</td><td>{fmt(r['DEO-Status Verified'])}</td><td>{fmt(r['DEO-Status Not Verified'])}</td></tr>)}</tbody></table></div></div>}
+ </>}
+ {master&&eci.length===0&&<div className="panel empty"><FileSpreadsheet size={40}/><h2>Upload the latest ECI report</h2><p>Your normal ECI file is the <b>NCT OF Delhi_NOTICE_REPORT_PART_WISE</b> export. Upload that file above; the dashboard will use it to refresh all ECI-derived numbers.</p></div>}
+ </main></div>
 }
