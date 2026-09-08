@@ -37,8 +37,9 @@ function extractEci(wb:XLSX.WorkBook){
   return rows.filter(r=>num(r['AC Number'])===34||safe(r['Asmbly Name']).toUpperCase()==='MATIALA')
 }
 
-// IMPORTANT: the master workbook supplies only fixed PS/master information.
-// Hearing dates must come from the authoritative Part Wise Hearing Summary upload.
+// The dashboard workbook supplies fixed PS/master information only.
+// Hearing dates and scheduled hearings come exclusively from the authoritative
+// Part Wise Hearing Summary upload.
 function extractMaster(wb:XLSX.WorkBook):Master{
   return {ps:read(wb,'PS_MASTER'),schedule:[]}
 }
@@ -55,8 +56,8 @@ function extractSchedule(wb:XLSX.WorkBook):ScheduleRow[]{
 export default function Home(){
   const[eci,setEci]=useState<Row[]>([]),[master,setMaster]=useState<Master|null>(null),[date,setDate]=useState(''),[q,setQ]=useState(''),[tab,setTab]=useState<'overview'|'officers'|'ps'|'eci'>('overview'),[error,setError]=useState(''),[source,setSource]=useState(''),[ready,setReady]=useState(false)
 
-  // v4 intentionally invalidates the old cached schedule. This prevents an old
-  // 380-row HEARING_DATA schedule from surviving after the source was corrected.
+  // v4 intentionally invalidates the old cached schedule so the previous
+  // 380-row HEARING_DATA dates cannot survive in the browser.
   useEffect(()=>{
     try{
       const raw=localStorage.getItem('ac34_master_v4')
@@ -95,7 +96,6 @@ export default function Home(){
       const schedule=extractSchedule(wb)
       if(!schedule.length)throw new Error('No valid hearing schedule found. Expected Part Wise Hearing Summary with Part No., Hearing Date and Total Hearings.')
       const unique=[...new Map(schedule.map(r=>[`${r.ps}|${r.dateKey}`,r])).values()]
-      if(unique.length<schedule.length)setError(`Loaded ${fmt(unique.length)} unique part/date records; duplicate rows were ignored.`)
       saveMaster(master?{...master,schedule:unique}:{ps:[],schedule:unique},`${f.name} — authoritative hearing schedule loaded`)
     }catch(e){setError(e instanceof Error?e.message:'Unable to read hearing schedule.')}
   }
@@ -115,10 +115,23 @@ export default function Home(){
   const dates=useMemo(()=>[...new Set((master?.schedule||[]).map(x=>x.dateKey).filter(Boolean))].sort(),[master])
   const eciMap=useMemo(()=>new Map(eci.map(r=>[num(r['Part No']??r['POLLING STATION']),r])),[eci])
   const psMap=useMemo(()=>new Map((master?.ps||[]).map(r=>[num(r['PS No.']),r])),[master])
-  const active=useMemo(()=> (master?.schedule||[]).filter(r=>r.dateKey===date).map(s=>({...psMap.get(s.ps),...eciMap.get(s.ps),'PS No.':s.ps,'Scheduled Notices for Hearing':s.scheduled,Date:s.dateKey})),[master,date,eciMap,psMap])
-  const filtered=useMemo(()=>{const x=q.trim().toLowerCase();return active.filter(r=>!x||[r['PS No.'],r['Old PS No.'],r.Officer,r['Hearing Centre'],r.BLO,r.Supervisor,r.Locality,r['Polling Area']].some(v=>safe(v).toLowerCase().includes(x)))},[active,q])
+
+  // Explicit Row typing here prevents TypeScript from narrowing the object
+  // produced by the spread operation to only its known literal properties.
+  const active=useMemo<Row[]>(()=>
+    (master?.schedule||[])
+      .filter(r=>r.dateKey===date)
+      .map((s):Row=>({...psMap.get(s.ps),...eciMap.get(s.ps),'PS No.':s.ps,'Scheduled Notices for Hearing':s.scheduled,Date:s.dateKey})),
+    [master,date,eciMap,psMap]
+  )
+
+  const filtered=useMemo<Row[]>(()=>{
+    const x=q.trim().toLowerCase()
+    return active.filter((r:Row)=>!x||[r['PS No.'],r['Old PS No.'],r.Officer,r['Hearing Centre'],r.BLO,r.Supervisor,r.Locality,r['Polling Area']].some(v=>safe(v).toLowerCase().includes(x)))
+  },[active,q])
+
   const total=useMemo(()=>active.reduce((a,r)=>({ps:a.ps+1,scheduled:a.scheduled+num(r['Scheduled Notices for Hearing']),generated:a.generated+num(r['Notice Generated']),delivered:a.delivered+num(r['Notice Delivered']),pending:a.pending+num(r['Notice Pending Delivery']),held:a.held+num(r['Hearings Held'])}),{ps:0,scheduled:0,generated:0,delivered:0,pending:0,held:0}),[active])
-  const officers=useMemo(()=>{const m=new Map<string,Row>();active.forEach(r=>{const k=`${safe(r.Officer)}|${safe(r['Hearing Centre'])}`,x=m.get(k)||{Officer:r.Officer,Mobile:r['Officer Mobile'],Centre:r['Hearing Centre'],PS:0,Scheduled:0,Generated:0,Delivered:0,Pending:0,Held:0};x.PS++;x.Scheduled+=num(r['Scheduled Notices for Hearing']);x.Generated+=num(r['Notice Generated']);x.Delivered+=num(r['Notice Delivered']);x.Pending+=num(r['Notice Pending Delivery']);x.Held+=num(r['Hearings Held']);m.set(k,x)});return[...m.values()]},[active])
+  const officers=useMemo(()=>{const m=new Map<string,Row>();active.forEach((r:Row)=>{const k=`${safe(r.Officer)}|${safe(r['Hearing Centre'])}`,x=m.get(k)||{Officer:r.Officer,Mobile:r['Officer Mobile'],Centre:r['Hearing Centre'],PS:0,Scheduled:0,Generated:0,Delivered:0,Pending:0,Held:0};x.PS++;x.Scheduled+=num(r['Scheduled Notices for Hearing']);x.Generated+=num(r['Notice Generated']);x.Delivered+=num(r['Notice Delivered']);x.Pending+=num(r['Notice Pending Delivery']);x.Held+=num(r['Hearings Held']);m.set(k,x)});return[...m.values()]},[active])
   const global=useMemo(()=>eci.reduce((a,r)=>({generated:a.generated+num(r['Notice Generated']),delivered:a.delivered+num(r['Notice Delivered']),pending:a.pending+num(r['Notice Pending Delivery']),held:a.held+num(r['Hearings Held']),hearingLapsed:a.hearingLapsed+num(r['Hearing Date Lapsed']),rescheduleLapsed:a.rescheduleLapsed+num(r['Reschedule Date Lapsed']),verified:a.verified+num(r['DEO-Status Verified']),notVerified:a.notVerified+num(r['DEO-Status Not Verified'])}),{generated:0,delivered:0,pending:0,held:0,hearingLapsed:0,rescheduleLapsed:0,verified:0,notVerified:0}),[eci])
   const chart=officers.map(o=>({name:safe(o.Officer).replace(/^SH\. |^SMT\. /,''),Scheduled:o.Scheduled,Delivered:o.Delivered,Pending:o.Pending}))
 
@@ -146,7 +159,7 @@ export default function Home(){
       {tab==='ps'&&<div className="panel"><h3>PS-wise Detail — {fmt(filtered.length)} records</h3><div className="table-wrap"><table className="table"><thead><tr><th>PS</th><th>Old PS</th><th>Officer</th><th>Hearing Centre</th><th>BLO</th><th>Supervisor</th><th>Scheduled</th><th>Generated</th><th>Delivered</th><th>Pending</th><th>Held</th><th>Locality</th><th>Polling Area</th><th>Anomaly</th><th>Mapping</th><th>Grand Total</th><th>Voters</th></tr></thead><tbody>{filtered.map((r,i)=><tr key={i}><td><b>{safe(r['PS No.'])}</b></td><td>{safe(r['Old PS No.'])}</td><td>{safe(r.Officer)}</td><td>{safe(r['Hearing Centre'])}</td><td>{safe(r.BLO)}</td><td>{safe(r.Supervisor)}</td><td>{fmt(r['Scheduled Notices for Hearing'])}</td><td>{fmt(r['Notice Generated'])}</td><td>{fmt(r['Notice Delivered'])}</td><td>{fmt(r['Notice Pending Delivery'])}</td><td>{fmt(r['Hearings Held'])}</td><td>{safe(r.Locality)}</td><td>{safe(r['Polling Area'])}</td><td>{fmt(r['Total Anomaly/Discrepancy'])}</td><td>{fmt(r['Total No Mapping'])}</td><td>{fmt(r['Grand Total'])}</td><td>{fmt(r['Total Voters'])}</td></tr>)}</tbody></table></div></div>}
       {tab==='eci'&&<div className="panel"><h3>Raw ECI Status — {fmt(eci.length)} AC-34 rows</h3><div className="table-wrap"><table className="table"><thead><tr><th>Part No</th><th>Notice Generated</th><th>Pending Generation</th><th>Delivered</th><th>Pending Delivery</th><th>Hearings Held</th><th>Hearing Lapsed</th><th>Reschedule Lapsed</th><th>DEO Pending</th><th>DEO &gt;5 Days</th><th>Verified</th><th>Not Verified</th></tr></thead><tbody>{eci.map((r,i)=><tr key={i}><td><b>{safe(r['Part No']??r['POLLING STATION'])}</b></td><td>{fmt(r['Notice Generated'])}</td><td>{fmt(r['Pending for Notice Generation'])}</td><td>{fmt(r['Notice Delivered'])}</td><td>{fmt(r['Notice Pending Delivery'])}</td><td>{fmt(r['Hearings Held'])}</td><td>{fmt(r['Hearing Date Lapsed'])}</td><td>{fmt(r['Reschedule Date Lapsed'])}</td><td>{fmt(r['DEO-Status Total Pending'])}</td><td>{fmt(r['DEO-Status Pending GT 5 Days'])}</td><td>{fmt(r['DEO-Status Verified'])}</td><td>{fmt(r['DEO-Status Not Verified'])}</td></tr>)}</tbody></table></div></div>}
       </>}
-      {master&&eci.length===0&&master.schedule.length>0&&<div className="panel empty"><FileSpreadsheet size={40}/><h2>Upload the latest ECI report</h2><p>Your authoritative hearing schedule is loaded. Upload the current ECI NOTICE_REPORT_PART_WISE Excel above to refresh the control position.</p></div>}
+      {master&&eci.length===0&&master.schedule.length>0&&<div className="panel empty"><FileSpreadsheet size={40}/><h2>Upload the latest ECI report</h2><p>Your hearing schedule is loaded. Upload the current ECI NOTICE_REPORT_PART_WISE Excel above to refresh the control position.</p></div>}
     </main>
   </div>
 }
